@@ -6,9 +6,7 @@
     <title>飞书仪表盘-记录总数+字段数值组合图（可配置版）</title>
     <!-- 引入ECharts -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-    <!-- 引入axios -->
-    <script src="https://cdn.jsdelivr.net/npm/axios@1.6.2/dist/axios.min.js"></script>
-    <!-- 飞书SDK -->
+    <!-- 飞书官方SDK（必须，提供鉴权和跨域请求能力） -->
     <script src="https://lf6-cdn-tos.bytecdntp.com/cdn/expire-1-year/im/feishu-plugin-sdk/1.0.0/feishu-plugin-sdk.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -57,12 +55,6 @@
     </div>
 
     <script>
-        // ########## 仅需替换这2个固定参数（飞书应用的，不用改） ##########
-        const FEISHU_CONFIG = {
-            appId: "cli_a9f36ffdbaba5cb3", // 替换为你的AppID，保留双引号
-            appSecret: "bE3N5zH6AgNoP5EhD8XpwhareuFFWcJJ" // 替换为你的AppSecret，保留双引号
-        };
-        // #################################################################
         const FEISHU_API = "https://open.feishu.cn/open-apis"; // 固定飞书API地址
         let chartInstance = null;
 
@@ -97,23 +89,8 @@
             initChart();
         }
 
-        // 3. 获取飞书鉴权Token（缓存，避免重复请求）
-        async function getFeishuToken() {
-            try {
-                const res = await axios.post(
-                    `${FEISHU_API}/auth/v3/tenant_access_token/internal`,
-                    { app_id: FEISHU_CONFIG.appId, app_secret: FEISHU_CONFIG.appSecret }
-                );
-                if (res.data.code !== 0) throw new Error(`鉴权失败：${res.data.msg}`);
-                return res.data.tenant_access_token;
-            } catch (err) {
-                showTip("error", err.message);
-                return null;
-            }
-        }
-
-        // 4. 拉取表格数据 + 前端统计（核心：自己计算记录总数，避开飞书原生限制）
-        async function fetchTableData(token) {
+        // 3. 拉取表格数据（核心：用飞书lark.request，无跨域，自动鉴权）
+        async function fetchTableData() {
             // 从本地获取配置参数
             const config = JSON.parse(localStorage.getItem("feishu_chart_config") || "{}");
             if (!config.baseId || !config.tableId || !config.fieldKey) {
@@ -122,41 +99,50 @@
             }
             const { baseId, tableId, fieldKey } = config;
 
-            try {
+            return new Promise((resolve, reject) => {
                 let allRecords = [];
                 let pageToken = "";
-                // 分页拉取所有数据（解决100条限制）
-                do {
-                    const res = await axios.get(
-                        `${FEISHU_API}/bitable/v1/apps/${baseId}/tables/${tableId}/records`,
-                        {
-                            headers: { Authorization: `Bearer ${token}` },
-                            params: { page_size: 100, page_token: pageToken }
+
+                // 递归分页拉取所有数据（飞书API默认每页100条）
+                function fetchPage() {
+                    lark.request({
+                        url: `${FEISHU_API}/bitable/v1/apps/${baseId}/tables/${tableId}/records`,
+                        method: "GET",
+                        params: { page_size: 100, page_token: pageToken },
+                        success: (res) => {
+                            if (res.code !== 0) {
+                                reject(new Error(`拉取数据失败：${res.msg || '未知错误'}`));
+                                return;
+                            }
+                            allRecords = [...allRecords, ...res.data.items];
+                            pageToken = res.data.page_token || "";
+                            // 有下一页则继续拉取，无则处理数据
+                            if (pageToken) {
+                                fetchPage();
+                            } else {
+                                // 前端自主统计：记录总数 + 字段数值
+                                const totalCount = allRecords.length;
+                                const fieldValues = allRecords.map(item => item.fields[fieldKey] || 0);
+                                const xData = fieldValues.map((_, i) => `数据${i+1}`);
+                                resolve({
+                                    total: Array(fieldValues.length).fill(totalCount),
+                                    fieldValues: fieldValues,
+                                    xData: xData,
+                                    fieldName: fieldKey
+                                });
+                            }
+                        },
+                        fail: (err) => {
+                            reject(new Error(`网络请求失败：${err.errMsg || JSON.stringify(err)}`));
                         }
-                    );
-                    if (res.data.code !== 0) throw new Error(`拉取数据失败：${res.data.msg}`);
-                    allRecords = [...allRecords, ...res.data.data.items];
-                    pageToken = res.data.data.page_token || "";
-                } while (pageToken);
+                    });
+                }
 
-                // 核心统计：自己计算记录总数 + 提取自定义字段数值
-                const totalCount = allRecords.length; // 统计记录总数（突破飞书原生限制）
-                const fieldValues = allRecords.map(item => item.fields[fieldKey] || 0); // 提取自定义字段数值
-                const xData = fieldValues.map((_, i) => `数据${i+1}`); // X轴类目（可后续优化为日期/姓名等维度）
-
-                return {
-                    total: Array(fieldValues.length).fill(totalCount), // 总数列，和字段数一致，方便组合展示
-                    fieldValues: fieldValues,
-                    xData: xData,
-                    fieldName: fieldKey // 字段名，用于图表标题/图例
-                };
-            } catch (err) {
-                showTip("error", err.message);
-                return null;
-            }
+                fetchPage();
+            });
         }
 
-        // 5. 初始化ECharts组合图（记录总数+字段数值，双Y轴，适配飞书主题）
+        // 4. 初始化ECharts组合图（记录总数+字段数值，双Y轴，适配飞书主题）
         function initECharts(data) {
             if (!data) return;
             const { total, fieldValues, xData, fieldName } = data;
@@ -165,8 +151,10 @@
                 chartInstance = echarts.init(document.getElementById("chart"));
                 // 窗口自适应
                 window.addEventListener("resize", () => chartInstance && chartInstance.resize());
-                // 适配飞书主题
-                window.lark?.on("themeChange", (theme) => chartInstance.setTheme(theme));
+                // 适配飞书主题切换
+                window.lark?.on("themeChange", (theme) => {
+                    chartInstance.setTheme(theme === "dark" ? "dark" : "light");
+                });
             }
             // 组合图配置（柱状图=记录总数，折线图=字段数值）
             const option = {
@@ -200,33 +188,46 @@
             };
             chartInstance.setOption(option);
             showTip("none");
-            // 适配飞书主题
+            // 适配飞书默认主题
             chartInstance.setTheme(window.lark?.getTheme() || "light");
         }
 
-        // 6. 核心入口：初始化图表（拉取数据+渲染）
+        // 5. 核心入口：初始化图表（拉取数据+渲染）
         async function initChart() {
-            showTip("loading", "正在获取鉴权...");
-            // 获取Token
-            const token = await getFeishuToken();
-            if (!token) return;
-            // 拉取数据
-            const data = await fetchTableData(token);
-            if (!data) return;
-            // 渲染组合图
-            initECharts(data);
+            // 先判断飞书SDK是否初始化完成
+            if (!window.lark) {
+                showTip("error", "飞书插件SDK初始化失败，请刷新仪表盘！");
+                return;
+            }
+            showTip("loading", "正在拉取表格数据...");
+            try {
+                // 拉取数据
+                const data = await fetchTableData();
+                if (!data) return;
+                // 渲染组合图
+                initECharts(data);
+            } catch (err) {
+                showTip("error", err.message);
+            }
         }
 
-        // 7. 页面加载：恢复本地配置 + 飞书生命周期适配
+        // 6. 页面加载：恢复本地配置 + 飞书插件生命周期适配
         window.onload = () => {
             // 恢复本地保存的配置
             const config = JSON.parse(localStorage.getItem("feishu_chart_config") || "{}");
             if (config.baseId) document.getElementById("baseId").value = config.baseId;
             if (config.tableId) document.getElementById("tableId").value = config.tableId;
             if (config.fieldKey) document.getElementById("fieldKey").value = config.fieldKey;
-            // 飞书仪表盘生命周期：挂载/更新时触发
-            window.lark?.on("mount", () => {});
-            window.lark?.on("update", () => initChart()); // 筛选器变化时自动刷新
+
+            // 飞书插件核心生命周期：挂载完成后初始化
+            window.lark?.on("mount", () => {
+                console.log("飞书插件挂载成功");
+            });
+            // 飞书仪表盘筛选器变化时，自动刷新图表
+            window.lark?.on("update", () => {
+                showTip("loading", "筛选器变化，重新拉取数据...");
+                initChart();
+            });
         };
     </script>
 </body>
