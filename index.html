@@ -7,7 +7,7 @@
     <!-- 引入ECharts -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <!-- 飞书官方SDK（必须，提供鉴权和跨域请求能力） -->
-    <script src="https://lf6-cdn-tos.bytecdntp.com/cdn/expire-1-year/im/feishu-plugin-sdk/1.0.0/feishu-plugin-sdk.min.js"></script>
+    <script src="https://lf3-cdn-tos.bytecdntp.com/cdn/expire-100-M/im/feishu-plugin-sdk/2.0.0/feishu-plugin-sdk.umd.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body, html { width: 100%; height: 100%; min-height: 500px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -194,6 +194,11 @@
 
         // 5. 核心入口：初始化图表（拉取数据+渲染）
         async function initChart() {
+            // 新增：判断lark是否存在
+            if (!window.lark) {
+                showTip("error", "飞书SDK未加载，请在飞书仪表盘内使用！");
+                return;
+            }
             // 先判断飞书SDK是否初始化完成
             if (!window.lark) {
                 showTip("error", "飞书插件SDK初始化失败，请刷新仪表盘！");
@@ -211,24 +216,42 @@
             }
         }
 
-        // 6. 页面加载：恢复本地配置 + 飞书插件生命周期适配
-        window.onload = () => {
-            // 恢复本地保存的配置
-            const config = JSON.parse(localStorage.getItem("feishu_chart_config") || "{}");
-            if (config.baseId) document.getElementById("baseId").value = config.baseId;
-            if (config.tableId) document.getElementById("tableId").value = config.tableId;
-            if (config.fieldKey) document.getElementById("fieldKey").value = config.fieldKey;
+        // 6. 核心：等飞书SDK初始化完成后，再执行所有逻辑（解决初始化失败）
+document.addEventListener("DOMContentLoaded", () => {
+    // 先恢复本地配置（不依赖lark，可提前执行）
+    const config = JSON.parse(localStorage.getItem("feishu_chart_config") || "{}");
+    if (config.baseId) document.getElementById("baseId").value = config.baseId;
+    if (config.tableId) document.getElementById("tableId").value = config.tableId;
+    if (config.fieldKey) document.getElementById("fieldKey").value = config.fieldKey;
 
-            // 飞书插件核心生命周期：挂载完成后初始化
-            window.lark?.on("mount", () => {
-                console.log("飞书插件挂载成功");
+    // 关键：飞书SDK初始化完成后，再绑定生命周期
+    if (window.lark) {
+        lark.ready(() => {
+            console.log("飞书SDK初始化成功");
+            // 飞书插件挂载完成后，执行初始化
+            lark.on("mount", () => {
+                showTip("loading", "插件挂载成功，等待配置...");
             });
-            // 飞书仪表盘筛选器变化时，自动刷新图表
-            window.lark?.on("update", () => {
+            // 筛选器变化时刷新
+            lark.on("update", () => {
                 showTip("loading", "筛选器变化，重新拉取数据...");
                 initChart();
             });
-        };
+            // 主题变化时适配
+            lark.on("themeChange", (theme) => {
+                if (chartInstance) chartInstance.setTheme(theme === "dark" ? "dark" : "light");
+            });
+        });
+
+        // 捕获SDK初始化失败的错误
+        lark.error((err) => {
+            showTip("error", `SDK初始化失败：${err.message || '请检查飞书客户端版本'}`);
+        });
+    } else {
+        // 非飞书环境提示（避免直接浏览器打开报错）
+        showTip("error", "请在飞书仪表盘插件环境中使用！");
+    }
+});
     </script>
 </body>
 </html>
